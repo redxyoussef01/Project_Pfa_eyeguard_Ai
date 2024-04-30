@@ -10,7 +10,7 @@ from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from io import BytesIO
 import time
-
+import datetime
 from keras.models import Model, Sequential
 from keras.layers import Input, Convolution2D, ZeroPadding2D, MaxPooling2D, Flatten, Dense, Dropout, Activation
 from PIL import Image
@@ -39,6 +39,33 @@ color = (67, 67, 67)
 face_cascade = cv2.CascadeClassifier(
     'C:/Python312/Lib/site-packages/cv2/data/haarcascade_frontalface_default.xml'
 )
+unauthorised = False
+
+
+def get_next_id(references):
+    ref_alert = db.reference(references)
+    alerts = ref_alert.get()
+    if alerts is not None:
+        max_id = 0
+        for empid, employee_auto in alerts.items():
+            if 'id' in employee_auto:
+                empid = int(employee_auto['id'])
+                max_id = max(max_id, empid)
+        return max_id + 1
+    else:
+        return 1
+
+
+def upload_image_to_bucket(frame_image, storage):
+
+    # Create a blob object with a unique name based on the current timestamp
+    blob = bucket.blob(f'{storage}/{get_next_id("alert_alert")-1}.jpg')
+
+    # Convert the image to JPEG format
+    _, image_buffer = cv2.imencode('.jpg', frame_image)
+
+    # Upload the image to the bucket
+    blob.upload_from_string(image_buffer.tobytes(), content_type='image/jpeg')
 
 
 def preprocess_image(image_data):
@@ -115,11 +142,12 @@ employees_autorisation = {}
 # Get the data from the Realtime Database
 employees_data = ref.get()
 employees_autori = ref2.get()
-
+ref_alert = db.reference('alert_alert')
+ref_log = db.reference('log_log')
 if employees_autori is not None:
     for employee_id, employee_auto in employees_autori.items():
-        if all(key in employee_auto for key in ['authorized', 'id']):
-            empid = employee_auto['id']
+        if all(key in employee_auto for key in ['authorized', 'personne_id']):
+            empid = employee_auto['personne_id']
             employee_state = employee_auto['authorized']
             employees_autorisation[empid] = employee_state
         else:
@@ -176,14 +204,16 @@ server.starttls()
 server.login(from_email, password)
 
 
-def send_email(to_email, from_email, object_detected=1, frame_image=None):
+def send_email(to_email, from_email, object_detected=1, frame_image=None, message_body=None):
+    if message_body is None:
+        message_body = f'ALERT - {
+            object_detected} Person has been detected Smoking!!'
+
     message = MIMEMultipart()
     message['From'] = from_email
     message['To'] = to_email
     message['Subject'] = "Security Alert"
 
-    # Add in the message body
-    message_body = f'ALERT - {object_detected} Person has been detected Smoking!!'
     message.attach(MIMEText(message_body, 'plain'))
 
     # Attach the frame image to the email
@@ -218,6 +248,10 @@ class ObjectDetection:
         # Delay parameters
         self.email_delay = 60  # Delay in seconds
         self.last_email_time = 0  # Time when the last email was sent
+        self.log_delay = 240  # Delay in seconds
+        self.last_log_time = 0  # Time when the last email was sent
+        self.Alert_delay = 240  # Delay in seconds
+        self.last_Alert_time = 0  # Time when the last email was sent
 
     def predict(self, im0):
         results = self.model(im0)
@@ -235,6 +269,7 @@ class ObjectDetection:
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
 
     def plot_bboxes(self, results, im0, employees):
+        global unauthorised
         class_ids = []
         self.annotator = Annotator(im0, 3, results[0].names)
         boxes = results[0].boxes.xyxy.cpu()
@@ -266,11 +301,38 @@ class ObjectDetection:
                     if similarity < 0.35:  # Threshold for similarity
                         label = employee_name
                         found = True
+                        current_time = time.time()
+                        if current_time - self.last_log_time >= self.log_delay:
+                            new_id = str(get_next_id('log_log'))
+                            ref_log.push({
+                                'id': new_id,
+                                # Update with correct personne_id
+                                'personne_id': employeesID[employee_name],
+                                'salle_id': '2',  # Update with correct salle_id
+                                # Add current time in ISO 8601 format
+                                'time': datetime.datetime.now().isoformat()
+                            })
+                            self.last_log_time = current_time
 
-                        print(employeesID[employee_name])
-                        print(
-                            employees_autorisation[employeesID[employee_name]])
+                        if employees_autorisation[employeesID[employee_name]]:
+                            unauthorised = True
+                            ref_alert = db.reference('alert_alert')
+                            new_id = str(get_next_id('alert_alert'))
+                            current_time = time.time()
+                            if current_time - self.last_Alert_time >= self.email_delay:
+                                ref_alert.push({
+                                    'id': new_id,
+                                    'image': '',  # Add image URL if available
+                                    # Update with correct personne_id
+                                    'personne_id': employeesID[employee_name],
+                                    'salle_id': '2',  # Update with correct salle_id
+                                    # Add current time in ISO 8601 format
+                                    'time': datetime.datetime.now().isoformat()
+                                })
+                                self.last_Alert_time = current_time
+                                print("Alert !!! ")
                         break
+
                 if not found:
                     label = 'Unknown'
 
@@ -285,6 +347,7 @@ class ObjectDetection:
         return im0, class_ids
 
     def __call__(self):
+        global unauthorised
         cap = cv2.VideoCapture(self.capture_index)
         assert cap.isOpened()
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -310,9 +373,22 @@ class ObjectDetection:
                 else:
                     self.email_sent = False
 
+            if unauthorised:
+                current_time = time.time()
+                if current_time - self.last_email_time >= self.email_delay:
+                    # Send email with the frame image
+                    send_email(to_email, from_email,
+                               class_ids.count(1), im0, "Unauthorised personne has been detected in the room")
+                    self.email_sent = True
+                    self.last_email_time = current_time  # Update last email time
+                    upload_image_to_bucket(im0, "Alert_Alert")
+                    print("image sent just wait")
+                    unauthorised = False
+
             cv2.imshow('Eye Guard', im0)
             frame_count += 1
-            if cv2.waitKey(5) & 0xFF == 27:  # press q to quit
+            key = cv2.waitKey(5) & 0xFF
+            if key == 27 or key == ord('q'):  # press q or ESC to quit
                 break
 
         cap.release()
