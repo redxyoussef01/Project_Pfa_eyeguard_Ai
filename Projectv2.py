@@ -310,7 +310,7 @@ class ObjectDetection:
                                 'personne_id': employeesID[employee_name],
                                 'salle_id': '2',  # Update with correct salle_id
                                 # Add current time in ISO 8601 format
-                                'time': datetime.datetime.now().isoformat()
+                                'insert_time': datetime.datetime.now().isoformat()
                             })
                             self.last_log_time = current_time
 
