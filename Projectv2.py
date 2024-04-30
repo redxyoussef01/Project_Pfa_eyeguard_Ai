@@ -314,7 +314,7 @@ class ObjectDetection:
                             })
                             self.last_log_time = current_time
 
-                        if employees_autorisation[employeesID[employee_name]]:
+                        if not employees_autorisation[employeesID[employee_name]]:
                             unauthorised = True
                             ref_alert = db.reference('alert_alert')
                             new_id = str(get_next_id('alert_alert'))
